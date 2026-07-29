@@ -15,7 +15,7 @@ Built for the annoying case: a publisher drops PDFs on a web server, tells nobod
 ## Quick start
 
 ```bash
-git clone https://github.com/yourname/mirrorwatch
+git clone https://github.com/W0rkingChr1s/mirrorwatch
 cd mirrorwatch
 mkdir -p config
 cp examples/html-index.json config/config.json   # then edit it
