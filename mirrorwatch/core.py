@@ -257,10 +257,11 @@ class Runner:
         if bootstrap and mode == "summary":
             files = sum(1 for e in events if e.kind == KIND_FILE)
             dirs = sum(1 for e in events if e.kind == KIND_DIR)
-            text = (f"\U0001f7e2 <b>mirrorwatch baseline established</b>\n"
-                    f"{summary['checked']} target(s) checked\n"
-                    f"{files} file(s) mirrored, {dirs} directory/-ies tracked\n"
-                    f"<i>From now on you only hear about real changes.</i>")
+            text = (f"\U0001f7e2 <b>mirrorwatch: Baseline erstellt</b>\n"
+                    f"{summary['checked']} Ziel(e) geprüft\n"
+                    f"{files} Datei(en) gespiegelt, {dirs} Verzeichnis(se) verfolgt\n"
+                    f"<i>Ab jetzt bekommst du nur noch echte Änderungen "
+                    f"gemeldet.</i>")
             for notifier in self.notifiers.values():
                 notifier.send_summary(text, summary)
             return
