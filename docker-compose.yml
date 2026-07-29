@@ -1,7 +1,10 @@
 services:
   mirrorwatch:
-    build: .
-    # image: ghcr.io/yourname/mirrorwatch:latest
+    # Pull the pre-built image published to GHCR by the build workflow.
+    # For local development against your own changes, comment out `image:`
+    # and uncomment `build: .` instead.
+    image: ghcr.io/w0rkingchr1s/mirrorwatch:latest
+    # build: .
     container_name: mirrorwatch
     environment:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
@@ -12,6 +15,9 @@ services:
       - ./config:/config:ro
       - mirrorwatch-data:/data
     restart: unless-stopped
+    labels:
+      # Let Watchtower auto-update this container when a new :latest is pushed.
+      - com.centurylinklabs.watchtower.enable=true
 
 volumes:
   mirrorwatch-data:

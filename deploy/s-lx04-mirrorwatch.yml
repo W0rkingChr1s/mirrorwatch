@@ -1,0 +1,35 @@
+# Portainer Stack: s-lx04-mirrorwatch
+#
+# Pre-built image from GHCR — no build context needed in the Portainer web
+# editor. Watchtower keeps it current: it pulls the :latest tag automatically,
+# so a merge to main on GitHub rolls out here on the next Watchtower cycle.
+#
+# mirrorwatch is an outbound-only poller (like the Whisper bot), so it needs no
+# macvlan IP and maps no ports.
+#
+# Setup:
+#   1. Put your config on the host at:
+#        /opt/stacks/s-lx04-mirrorwatch/config/config.json
+#      (start from one of the examples in the repo).
+#   2. In Portainer set the stack env vars TELEGRAM_TOKEN and TELEGRAM_CHAT_ID.
+#   3. Deploy. Check logs for "baseline established".
+
+services:
+  mirrorwatch:
+    image: ghcr.io/w0rkingchr1s/mirrorwatch:latest
+    container_name: s-lx04-mirrorwatch
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - MIRRORWATCH_INTERVAL=21600
+      - MIRRORWATCH_LOG_LEVEL=INFO
+    volumes:
+      - /opt/stacks/s-lx04-mirrorwatch/config:/config:ro
+      - mirrorwatch-data:/data
+    labels:
+      # Explicit opt-in in case Watchtower runs with label-scoping enabled.
+      - com.centurylinklabs.watchtower.enable=true
+
+volumes:
+  mirrorwatch-data:

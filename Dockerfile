@@ -2,6 +2,7 @@ FROM python:3.12-alpine
 
 LABEL org.opencontainers.image.title="mirrorwatch" \
       org.opencontainers.image.description="Watch HTTP endpoints for new and changed files, mirror them, get notified." \
+      org.opencontainers.image.source="https://github.com/W0rkingChr1s/mirrorwatch" \
       org.opencontainers.image.licenses="MIT"
 
 RUN adduser -D -u 10001 mirrorwatch
