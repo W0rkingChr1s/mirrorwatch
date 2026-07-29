@@ -1,8 +1,8 @@
 name: build & publish image
 
 # Builds the container on every push, runs the test suite first, and publishes
-# a pre-built image to GHCR. The `latest` tag on the default line is what
-# Watchtower watches, so a merge to main rolls out to the homelab on its own.
+# a pre-built image to GHCR. The `latest` tag tracks main, so an updater such
+# as Watchtower can roll new builds out automatically.
 
 on:
   push:

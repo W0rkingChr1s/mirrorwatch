@@ -34,7 +34,7 @@ docker compose logs -f
 ```
 
 No build step: the image is published to GHCR by CI. See
-[Deployment](#deployment) for Portainer and auto-updates.
+[Deployment](#deployment).
 
 ---
 
@@ -56,28 +56,34 @@ Tags: `latest` tracks `main`; `vX.Y.Z` / `X.Y` are cut from git tags; a
 docker pull ghcr.io/w0rkingchr1s/mirrorwatch:latest
 ```
 
-### Portainer
+### Run it
 
-`deploy/s-lx04-mirrorwatch.yml` is a ready-to-paste stack. It pulls the
-pre-built image (no build context needed in the web editor), stores state in a
-named volume, and reads its config from a bind mount.
+The bundled `docker-compose.yml` pulls the pre-built image and mounts a config
+directory and a state volume:
 
-1. Put your config on the host at
-   `/opt/stacks/s-lx04-mirrorwatch/config/config.json` (start from an
-   `examples/` file).
-2. In Portainer, add the stack, then set the stack env vars `TELEGRAM_TOKEN`
-   and `TELEGRAM_CHAT_ID`.
-3. Deploy and watch the logs for `baseline established`.
+```bash
+mkdir -p config
+cp examples/html-index.json config/config.json   # then edit it
+cp .env.example .env                              # Telegram token etc.
 
-Because mirrorwatch only makes outbound requests, the stack maps no ports and
-needs no macvlan address.
+docker compose up -d
+docker compose logs -f          # watch for "baseline established"
+```
 
-### Auto-updates with Watchtower
+mirrorwatch only makes outbound requests, so the container maps no ports. State
+lives in the `mirrorwatch-data` volume and survives image updates, so nothing is
+re-notified after an upgrade.
 
-The container carries the `com.centurylinklabs.watchtower.enable=true` label,
-so a Watchtower instance rolls out each new `:latest` automatically. When CI
-publishes a fresh image after a merge, the running container is replaced on the
-next Watchtower cycle — the state volume is preserved, so nothing is re-notified.
+The same compose file loads in any Compose-compatible UI (Portainer, Dockge,
+…) — point the config bind mount at a path on your host and set `TELEGRAM_TOKEN`
+/ `TELEGRAM_CHAT_ID` as environment variables.
+
+### Optional: auto-updates
+
+The container carries the `com.centurylinklabs.watchtower.enable=true` label.
+If you run [Watchtower](https://containrrr.dev/watchtower/), it rolls out each
+new `:latest` automatically; if you don't, the label is simply ignored. To pin a
+version instead, replace `:latest` with a `vX.Y.Z` tag and update deliberately.
 
 ---
 
