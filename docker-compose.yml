@@ -1,0 +1,17 @@
+services:
+  mirrorwatch:
+    build: .
+    # image: ghcr.io/yourname/mirrorwatch:latest
+    container_name: mirrorwatch
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - MIRRORWATCH_INTERVAL=21600
+      - MIRRORWATCH_LOG_LEVEL=INFO
+    volumes:
+      - ./config:/config:ro
+      - mirrorwatch-data:/data
+    restart: unless-stopped
+
+volumes:
+  mirrorwatch-data:

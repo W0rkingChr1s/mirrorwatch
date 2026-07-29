@@ -1,0 +1,55 @@
+{
+  "_comment": "Real world example of a server with no listing and a broken 404. Every missing path answers HTTP 200 with a short HTML body, so status codes are useless here and the detect rules key on Content-Type instead. Directories expose a POSIX mtime, which is what makes 'something new appeared' detectable at all.",
+
+  "interval_seconds": 21600,
+  "bootstrap_notify": "summary",
+  "state_file": "/data/state.json",
+  "mirror": {
+    "enabled": true,
+    "dir": "/data/mirror",
+    "archive_dir": "/data/archive",
+    "keep_versions": true
+  },
+
+  "notifiers": {
+    "telegram": {
+      "type": "telegram",
+      "token": "env:TELEGRAM_TOKEN",
+      "chat_id": "env:TELEGRAM_CHAT_ID",
+      "send_files": true,
+      "max_mb": 45
+    }
+  },
+
+  "sources": [
+    {
+      "name": "prowin-print",
+      "type": "probe",
+      "base_url": "https://prowin-hub.net/files/public/public.php?file=",
+      "detect": {
+        "missing": [{ "content_type": "text/html" }],
+        "directory": [{ "content_type": "directory" }],
+        "default": "file"
+      },
+      "dirs": [
+        "doc/1/de",
+        "doc/1/de/printmedien",
+        "doc/1/de/printmedien/flyer",
+        "doc/1/de/printmedien/flyer/yellow-weeks",
+        "doc/1/de/printmedien/kataloge",
+        "doc/1/de/media",
+        "doc/1/de/werbemittel",
+        "doc/1/de/aktionen"
+      ],
+      "files": [
+        "doc/1/de/printmedien/flyer/yellow-weeks/yellowweeks2026.pdf"
+      ],
+      "probes": [
+        {
+          "template": "doc/1/de/printmedien/flyer/yellow-weeks/yellowweeks{yyyy}.pdf",
+          "years": { "from": 2026, "to": 2028 }
+        }
+      ]
+    }
+  ]
+}
