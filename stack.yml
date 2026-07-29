@@ -1,0 +1,35 @@
+# Paste-ready stack for Portainer (or any Compose UI) — no host files needed.
+#
+# The entire mirrorwatch config travels in the MIRRORWATCH_CONFIG_JSON env var,
+# so there is nothing to bind-mount. In Portainer: Stacks -> Add stack -> Web
+# editor, paste this, then set the environment variables below.
+#
+# Required stack env vars:
+#   TELEGRAM_TOKEN         your bot token
+#   TELEGRAM_CHAT_ID       target chat / channel id
+#   MIRRORWATCH_CONFIG_JSON  the whole config as one-line JSON, e.g.:
+#     {"sources":[{"name":"minutes","type":"index","url":"https://example.org/pub/","match":"\\.pdf$","notify":["telegram"]}],
+#      "notifiers":{"telegram":{"type":"telegram","token":"env:TELEGRAM_TOKEN","chat_id":"env:TELEGRAM_CHAT_ID"}}}
+#
+# state_file / mirror dirs default to /data via the image's env, so the named
+# volume below keeps history across updates.
+
+services:
+  mirrorwatch:
+    image: ghcr.io/w0rkingchr1s/mirrorwatch:latest
+    container_name: mirrorwatch
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - MIRRORWATCH_CONFIG_JSON=${MIRRORWATCH_CONFIG_JSON}
+      - MIRRORWATCH_INTERVAL=21600
+      - MIRRORWATCH_LOG_LEVEL=INFO
+    volumes:
+      - mirrorwatch-data:/data
+    labels:
+      # Optional: let Watchtower auto-update when a new :latest is published.
+      - com.centurylinklabs.watchtower.enable=true
+
+volumes:
+  mirrorwatch-data:
