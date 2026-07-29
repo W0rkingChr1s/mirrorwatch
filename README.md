@@ -1,0 +1,237 @@
+# mirrorwatch
+
+Watch HTTP endpoints for new and changed files, mirror them locally, and get notified — with the file attached.
+
+Built for the annoying case: a publisher drops PDFs on a web server, tells nobody, and offers no feed, no listing, and no sane 404. mirrorwatch notices anyway, and brings you a copy.
+
+- **No dependencies.** Python standard library only. The Docker image is `python:3.12-alpine` plus one package directory.
+- **Content-aware.** Compares SHA-256, not just `Last-Modified`. A re-upload of identical bytes stays quiet.
+- **Server quirks live in config, not code.** Detection rules are data, so a server that answers `HTTP 200` for missing files is a config entry rather than a fork.
+- **Mirrors and archives.** Every version is kept, so you can diff last year's flyer against this year's.
+- **Telegram, webhook, ntfy.** Files under the size limit are sent as attachments.
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/yourname/mirrorwatch
+cd mirrorwatch
+mkdir -p config
+cp examples/html-index.json config/config.json   # then edit it
+cp .env.example .env                             # then edit it
+
+python -m mirrorwatch check   -c config/config.json   # validate
+python -m mirrorwatch targets -c config/config.json   # what would be watched
+python -m mirrorwatch once    -c config/config.json --dry-run
+```
+
+Docker:
+
+```bash
+docker compose up -d
+docker compose logs -f
+```
+
+---
+
+## How it decides what changed
+
+For every target, mirrorwatch sends a `HEAD` request and classifies the answer as **file**, **directory**, **missing**, or **error**.
+
+| Situation | What happens |
+|---|---|
+| Headers unchanged since last run | Nothing. No download. |
+| Headers moved, bytes identical | State updated, no notification. |
+| Bytes differ | Previous version archived, new one mirrored, notification sent. |
+| Previously present, now missing | `gone` notification. The mirror copy is kept. |
+| Network error | Nothing. An unreachable server is never reported as a deletion. |
+
+Directories are compared by `Last-Modified` alone, because there is nothing to hash. On a normal POSIX filesystem that timestamp moves whenever a file inside is added, replaced, or removed — which is often the only way to learn that *something* appeared on a server with no listing.
+
+---
+
+## Sources
+
+### `index` — scrape an overview page
+
+The one to reach for first. Fetches HTML, extracts `<a href>`, keeps what matches. New files are discovered on their own.
+
+```json
+{
+  "name": "council-minutes",
+  "type": "index",
+  "url": "https://example.org/publications/",
+  "match": "\\.pdf$",
+  "exclude": "/archive/|draft",
+  "recursive": { "depth": 1, "match": "/publications/[0-9]{4}/$" }
+}
+```
+
+`match` and `exclude` are regular expressions tested against the absolute URL. Recursion only follows links matching `recursive.match`, bounded by `depth`. Off-host links are skipped unless `same_host_only` is `false`.
+
+### `probe` — ask about paths one by one
+
+For servers with no listing at all. You supply known paths and templates; mirrorwatch checks which exist.
+
+```json
+{
+  "name": "some-hub",
+  "type": "probe",
+  "base_url": "https://example.net/files.php?file=",
+  "dirs":  ["docs/de/flyer"],
+  "files": ["docs/de/flyer/spring2026.pdf"],
+  "probes": [
+    { "template": "docs/de/flyer/spring{yyyy}.pdf", "years": { "from": 2026, "to": 2028 } }
+  ]
+}
+```
+
+Placeholders: `{yyyy}`, `{yy}`, `{mm}`, and `{v}` with a `values` list. A `base_url` ending in `=`, `?`, or `&` is concatenated directly; otherwise paths are joined with `/`.
+
+Probing is guessing. Use it only when there is genuinely no index page.
+
+### `urls` — a fixed list
+
+```json
+{ "name": "releases", "type": "urls", "urls": ["https://example.org/latest.zip"] }
+```
+
+Set `"download": false` on any source to track changes from headers alone, without fetching the body. Useful for multi-gigabyte files.
+
+---
+
+## Detection rules
+
+Servers disagree about how to say "not found". Instead of hardcoding one server's behaviour, describe it:
+
+```json
+"detect": {
+  "missing":   [{ "content_type": "text/html" }],
+  "directory": [{ "content_type": "directory" }],
+  "default":   "file"
+}
+```
+
+A rule matches when **all** of its criteria match. Available criteria:
+
+| Criterion | Meaning |
+|---|---|
+| `status` | int or list, exact match |
+| `status_range` | `[min, max]`, inclusive |
+| `content_type` | string or list, prefix match, case insensitive |
+| `max_size` / `min_size` | bounds on `Content-Length`; ignored when the server sends none |
+| `url_suffix` | string or list; URL ends with one of them |
+
+Defaults treat `404/403/410/451` as missing and any other `2xx` as a file, which is right for most servers.
+
+`examples/prowin-hub.json` documents a real endpoint that answers `HTTP 200` with a 31-byte HTML body for every path that does not exist, making status codes useless — exactly the case these rules exist for.
+
+---
+
+## Notifiers
+
+Secrets never belong in the config file. Use `env:NAME` or `file:/path`.
+
+```json
+"notifiers": {
+  "telegram": {
+    "type": "telegram",
+    "token": "env:TELEGRAM_TOKEN",
+    "chat_id": "env:TELEGRAM_CHAT_ID",
+    "send_files": true,
+    "max_mb": 45
+  }
+}
+```
+
+| Type | Notes |
+|---|---|
+| `telegram` | Sends the file as a document with a caption. Falls back to a text message when the file exceeds `max_mb` (Telegram's bot upload ceiling is 50 MB). Honours `retry_after` on rate limits. |
+| `webhook` | `POST`s a JSON document with the full event list. Custom headers supported. |
+| `ntfy` | Plain text push, optional bearer token. |
+| `stdout` | Logs only. Handy while tuning a config. |
+
+Route per source with `"notify": ["telegram"]`. Omit it and every notifier gets everything.
+
+**Telegram setup:** create a bot with [@BotFather](https://t.me/BotFather), add it to the channel as an administrator with permission to post, then find the chat id:
+
+```bash
+curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" \
+  | python3 -c "import json,sys;[print(u.get('channel_post',{}).get('chat')) for u in json.load(sys.stdin)['result']]"
+```
+
+---
+
+## The first run
+
+A first run would otherwise announce everything it finds. `bootstrap_notify` controls that:
+
+| Value | Behaviour |
+|---|---|
+| `summary` (default) | One message: how many targets, how many files mirrored. |
+| `full` | Every discovery reported individually. |
+| `none` | Silence. Baseline only. |
+
+---
+
+## Commands
+
+```
+mirrorwatch run                 # loop forever on interval_seconds
+mirrorwatch once [--dry-run]    # single pass; dry-run writes nothing anywhere
+mirrorwatch check               # validate config, exit non-zero on problems
+mirrorwatch targets             # resolve and print every target, without requests to files
+mirrorwatch status [--json] [--max-age SECONDS]
+```
+
+`status --max-age` is what the container healthcheck uses: it fails when the last completed run is older than the given number of seconds.
+
+---
+
+## Configuration reference
+
+| Key | Default | Meaning |
+|---|---|---|
+| `interval_seconds` | `21600` | Time between runs in `run` mode |
+| `request_delay_ms` | `250` | Pause between requests; be kind to other people's servers |
+| `timeout` | `60` | Per-request timeout in seconds |
+| `retries` | `2` | Retries on network errors, with linear backoff |
+| `max_download_mb` | `200` | Bodies larger than this are refused |
+| `user_agent` | `mirrorwatch/0.1 …` | Set something identifiable with contact details |
+| `state_file` | `./data/state.json` | Written atomically |
+| `mirror.enabled` | `true` | Turn off to notify without storing |
+| `mirror.dir` | `./data/mirror` | Layout: `<mirror>/<source>/<path>` |
+| `mirror.archive_dir` | `./data/archive` | Previous versions, timestamp-suffixed |
+| `mirror.keep_versions` | `true` | Off means overwrite in place |
+| `bootstrap_notify` | `summary` | `summary`, `full`, or `none` |
+
+These environment variables override the file, which is what you want in a container: `MIRRORWATCH_CONFIG`, `MIRRORWATCH_STATE_FILE`, `MIRRORWATCH_MIRROR_DIR`, `MIRRORWATCH_ARCHIVE_DIR`, `MIRRORWATCH_INTERVAL`, `MIRRORWATCH_USER_AGENT`, `MIRRORWATCH_REQUEST_DELAY_MS`, `MIRRORWATCH_BOOTSTRAP_NOTIFY`, `MIRRORWATCH_LOG_LEVEL`.
+
+---
+
+## Please be a good citizen
+
+mirrorwatch makes requests to servers you do not own.
+
+- Keep `request_delay_ms` sane. The default is deliberately unhurried.
+- Poll hourly at most unless you know the publisher is fine with more.
+- Put real contact details in `user_agent` so an administrator can reach you instead of blocking you.
+- Check the site's terms and `robots.txt`. Probe sources in particular walk a line between "checking a URL" and "enumerating someone's filesystem" — use them only where no index exists, and keep the candidate list small.
+- Mirrored files stay under their original copyright. A local mirror is not a licence to redistribute.
+
+---
+
+## Development
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+26 tests, no network access required — a local HTTP server covers the full lifecycle: discovery, unchanged runs, header-only changes, real content changes, archiving, deletion, and the guarantee that a network failure is never reported as a deletion.
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).

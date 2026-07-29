@@ -1,0 +1,39 @@
+{
+  "_comment": "The common case: a site has an overview page listing files. The index source scrapes <a href> links, keeps the PDFs, and discovers new files on its own. Copy this to config/config.json and edit the URL, match and notifier settings.",
+
+  "interval_seconds": 21600,
+  "request_delay_ms": 250,
+  "bootstrap_notify": "summary",
+  "state_file": "/data/state.json",
+  "mirror": {
+    "enabled": true,
+    "dir": "/data/mirror",
+    "archive_dir": "/data/archive",
+    "keep_versions": true
+  },
+
+  "notifiers": {
+    "telegram": {
+      "type": "telegram",
+      "token": "env:TELEGRAM_TOKEN",
+      "chat_id": "env:TELEGRAM_CHAT_ID",
+      "send_files": true,
+      "max_mb": 45
+    }
+  },
+
+  "sources": [
+    {
+      "name": "council-minutes",
+      "type": "index",
+      "url": "https://example.org/publications/",
+      "match": "\\.pdf$",
+      "exclude": "/archive/|draft",
+      "recursive": {
+        "depth": 1,
+        "match": "/publications/[0-9]{4}/$"
+      },
+      "notify": ["telegram"]
+    }
+  ]
+}
