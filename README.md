@@ -14,6 +14,19 @@ Built for the annoying case: a publisher drops PDFs on a web server, tells nobod
 
 ## Quick start
 
+One line scaffolds a ready-to-edit deployment directory (compose file, an
+example config, and an `.env` template):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/W0rkingChr1s/mirrorwatch/main/install.sh | sh
+```
+
+Then edit `mirrorwatch/config.json` and `mirrorwatch/.env`, and `docker compose
+up -d`. That's it — the pre-built image is pulled from GHCR, no build step.
+
+<details>
+<summary>Prefer to do it by hand?</summary>
+
 ```bash
 git clone https://github.com/W0rkingChr1s/mirrorwatch
 cd mirrorwatch
@@ -24,17 +37,11 @@ cp .env.example .env                             # then edit it
 python -m mirrorwatch check   -c config/config.json   # validate
 python -m mirrorwatch targets -c config/config.json   # what would be watched
 python -m mirrorwatch once    -c config/config.json --dry-run
-```
 
-Docker (pre-built image):
-
-```bash
-docker compose up -d      # pulls ghcr.io/w0rkingchr1s/mirrorwatch:latest
+docker compose up -d
 docker compose logs -f
 ```
-
-No build step: the image is published to GHCR by CI. See
-[Deployment](#deployment).
+</details>
 
 ---
 
@@ -74,9 +81,23 @@ mirrorwatch only makes outbound requests, so the container maps no ports. State
 lives in the `mirrorwatch-data` volume and survives image updates, so nothing is
 re-notified after an upgrade.
 
-The same compose file loads in any Compose-compatible UI (Portainer, Dockge,
-…) — point the config bind mount at a path on your host and set `TELEGRAM_TOKEN`
-/ `TELEGRAM_CHAT_ID` as environment variables.
+### Portainer / paste-only stack
+
+`stack.yml` needs no host files at all: the whole config travels in the
+`MIRRORWATCH_CONFIG_JSON` environment variable. In Portainer, add a stack, paste
+`stack.yml`, and set three env vars — `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`, and
+`MIRRORWATCH_CONFIG_JSON` (your config as one-line JSON). Deploy.
+
+`MIRRORWATCH_CONFIG_JSON` works anywhere: when set, it overrides the config
+file, so a plain `docker run` needs no mount either:
+
+```bash
+docker run -d --name mirrorwatch \
+  -e TELEGRAM_TOKEN=... -e TELEGRAM_CHAT_ID=... \
+  -e MIRRORWATCH_CONFIG_JSON='{"sources":[...],"notifiers":{...}}' \
+  -v mirrorwatch-data:/data \
+  ghcr.io/w0rkingchr1s/mirrorwatch:latest
+```
 
 ### Optional: auto-updates
 
@@ -259,6 +280,8 @@ mirrorwatch status [--json] [--max-age SECONDS]
 | `bootstrap_notify` | `summary` | `summary`, `full`, or `none` |
 
 These environment variables override the file, which is what you want in a container: `MIRRORWATCH_CONFIG`, `MIRRORWATCH_STATE_FILE`, `MIRRORWATCH_MIRROR_DIR`, `MIRRORWATCH_ARCHIVE_DIR`, `MIRRORWATCH_INTERVAL`, `MIRRORWATCH_USER_AGENT`, `MIRRORWATCH_REQUEST_DELAY_MS`, `MIRRORWATCH_BOOTSTRAP_NOTIFY`, `MIRRORWATCH_LOG_LEVEL`.
+
+`MIRRORWATCH_CONFIG_JSON` goes one step further: set it to the whole config as JSON and mirrorwatch skips the file entirely. This is what makes a one-paste container stack possible — see [Deployment](#portainer--paste-only-stack).
 
 ---
 

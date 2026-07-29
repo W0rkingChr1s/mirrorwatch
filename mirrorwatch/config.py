@@ -38,6 +38,17 @@ class ConfigError(Exception):
 
 
 def _load_raw(path: str) -> dict:
+    # The whole config can travel in an environment variable instead of a file.
+    # Handy for one-paste container stacks (e.g. Portainer) where mounting a
+    # file is awkward. When set, it wins over the file at `path`.
+    inline = os.environ.get("MIRRORWATCH_CONFIG_JSON")
+    if inline and inline.strip():
+        try:
+            return json.loads(inline)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(
+                f"MIRRORWATCH_CONFIG_JSON is not valid JSON: {exc}") from exc
+
     if not os.path.exists(path):
         raise ConfigError(f"config file not found: {path}")
 

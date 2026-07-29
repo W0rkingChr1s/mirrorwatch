@@ -341,6 +341,28 @@ class TestConfigValidation(unittest.TestCase):
             load(path)
         os.unlink(path)
 
+    def test_inline_config_json_env(self):
+        os.environ["MIRRORWATCH_CONFIG_JSON"] = json.dumps({
+            "sources": [{"name": "s", "type": "urls", "urls": ["http://x/y"]}],
+            "interval_seconds": 4242,
+        })
+        try:
+            # No file needed: the path does not exist and is ignored.
+            config = load("/nonexistent/config.json")
+            self.assertEqual(config["interval_seconds"], 4242)
+            self.assertEqual(config["sources"][0]["name"], "s")
+        finally:
+            del os.environ["MIRRORWATCH_CONFIG_JSON"]
+
+    def test_inline_config_json_rejects_garbage(self):
+        os.environ["MIRRORWATCH_CONFIG_JSON"] = "{not json"
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load("/nonexistent/config.json")
+            self.assertIn("MIRRORWATCH_CONFIG_JSON", str(ctx.exception))
+        finally:
+            del os.environ["MIRRORWATCH_CONFIG_JSON"]
+
     def test_env_override_wins(self):
         path = self._write({"sources": [{"name": "s", "type": "urls",
                                          "urls": ["http://x/y"]}],
