@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 
 from .events import CHANGED, GONE, NEW, Event
 from .util import LOG, html_escape, human_size, now_iso, resolve_secret
@@ -36,6 +37,32 @@ def guess_mime(filename: str) -> str:
         if lowered.endswith(ext):
             return mime
     return "application/octet-stream"
+
+
+def de_datetime(iso: str | None, with_time: bool = False) -> str:
+    """Render an ISO 8601 timestamp as a friendly German date.
+
+    ``2021-11-15T12:01:15+00:00`` -> ``15.11.2021`` (or ``15.11.2021 12:01``
+    with ``with_time``). Falls back to a trimmed raw value if parsing fails,
+    so a malformed timestamp never breaks a notification.
+    """
+    if not iso:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(iso.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return iso[:16].replace("T", " ")
+    return parsed.strftime("%d.%m.%Y %H:%M" if with_time else "%d.%m.%Y")
+
+
+def de_size(num_bytes: int | None) -> str:
+    """Human-friendly size with a German decimal comma (``453,5 KB``)."""
+    return human_size(num_bytes).replace(".", ",")
+
+
+def leaf(path: str) -> str:
+    """The last path segment (``a/b/c`` -> ``c``), for a compact heading."""
+    return (path or "").rstrip("/").rsplit("/", 1)[-1] or (path or "")
 
 
 def multipart(fields: dict, files: list) -> tuple[bytes, str]:
@@ -245,23 +272,29 @@ class TelegramNotifier(Notifier):
     @staticmethod
     def _caption(event: Event) -> str:
         heading = {
-            NEW: "\U0001f195 <b>New file</b>",
-            CHANGED: "\U0001f504 <b>File updated</b>",
-        }.get(event.type, f"<b>{event.type}</b>")
+            NEW: "\U0001f195 <b>Neue Datei</b>",
+            CHANGED: "\U0001f504 <b>Datei aktualisiert</b>",
+        }.get(event.type, f"<b>{html_escape(event.type)}</b>")
 
-        parts = [heading,
-                 f"<code>{html_escape(event.filename or event.path)}</code>"]
+        name = html_escape(event.filename or leaf(event.path))
+        parts = [heading, f"<b>{name}</b>"]
+
         meta = []
         if event.size is not None:
-            meta.append(human_size(event.size))
+            meta.append(de_size(event.size))
         if event.last_modified:
-            meta.append(f"as of {html_escape(event.last_modified[:10])}")
+            meta.append(de_datetime(event.last_modified))
         if meta:
-            parts.append(" \u00b7 ".join(meta))
-        parts.append(f"<i>{html_escape(event.source)}</i>")
-        parts.append(f'<a href="{html_escape(event.url)}">source</a>')
+            parts.append("  \u00b7  ".join(meta))
+
+        footer = f"\U0001f4c2 {html_escape(event.source)}"
+        if event.url:
+            footer += (f"  \u00b7  \U0001f517 "
+                       f'<a href="{html_escape(event.url)}">Quelle</a>')
+        parts.append(footer)
+
         if event.type == CHANGED and event.previous_modified:
-            parts.append(f"previously: {html_escape(event.previous_modified[:10])}")
+            parts.append(f"<i>zuvor: {de_datetime(event.previous_modified)}</i>")
         return "\n".join(parts)
 
     def send(self, events: list[Event], context: dict) -> None:
@@ -271,10 +304,12 @@ class TelegramNotifier(Notifier):
             elif event.kind == "dir":
                 self._send_dir_event(event)
             elif event.type == GONE:
+                art = "Datei" if event.kind == "file" else "Verzeichnis"
                 self._message(
-                    f"\U0001f5d1 <b>No longer available</b>\n"
-                    f"<code>{html_escape(event.path)}</code> ({event.kind})\n"
-                    f"<i>{html_escape(event.source)}</i>")
+                    f"\U0001f5d1 <b>Nicht mehr verfügbar</b>\n"
+                    f"<b>{html_escape(leaf(event.path))}</b>\n"
+                    f"<code>{html_escape(event.path)}</code>\n"
+                    f"\U0001f4c2 {html_escape(event.source)} · {art}")
             time.sleep(self.pause)
 
     def _send_file_event(self, event: Event) -> None:
@@ -292,17 +327,24 @@ class TelegramNotifier(Notifier):
             self._message(caption + note)
 
     def _send_dir_event(self, event: Event) -> None:
-        heading = ("\U0001f4c1 <b>New directory</b>" if event.type == NEW
-                   else "\U0001f4c1 <b>Directory changed</b>")
-        text = (f"{heading}\n"
-                f"<code>{html_escape(event.path)}</code>\n"
-                f"<i>{html_escape(event.source)}</i>\n"
-                f"mtime: {html_escape((event.last_modified or '')[:19])}")
-        if event.previous_modified:
-            text += f"\npreviously: {html_escape(event.previous_modified[:19])}"
-        text += ("\n<i>This server exposes no listing, so which file changed "
-                 "is unknown.</i>")
-        self._message(text)
+        new = event.type == NEW
+        heading = ("\U0001f4c1 <b>Neues Verzeichnis</b>" if new
+                   else "\U0001f504 <b>Verzeichnis geändert</b>")
+        parts = [heading,
+                 f"<b>{html_escape(leaf(event.path))}</b>",
+                 f"<code>{html_escape(event.path)}</code>"]
+
+        when = de_datetime(event.last_modified, with_time=not new)
+        source = f"\U0001f4c2 {html_escape(event.source)}"
+        parts.append(f"\U0001f5d3 {when}  ·  {source}" if when else source)
+
+        if not new:
+            if event.previous_modified:
+                parts.append("<i>zuvor: "
+                             f"{de_datetime(event.previous_modified, with_time=True)}</i>")
+            parts.append("<i>ℹ️ Kein Listing verfügbar – welche Datei "
+                         "sich geändert hat, ist unbekannt.</i>")
+        self._message("\n".join(parts))
 
     def send_summary(self, text: str, context: dict) -> None:
         self._message(text)
