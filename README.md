@@ -26,12 +26,58 @@ python -m mirrorwatch targets -c config/config.json   # what would be watched
 python -m mirrorwatch once    -c config/config.json --dry-run
 ```
 
-Docker:
+Docker (pre-built image):
 
 ```bash
-docker compose up -d
+docker compose up -d      # pulls ghcr.io/w0rkingchr1s/mirrorwatch:latest
 docker compose logs -f
 ```
+
+No build step: the image is published to GHCR by CI. See
+[Deployment](#deployment) for Portainer and auto-updates.
+
+---
+
+## Deployment
+
+### Pre-built image
+
+Every push to `main` runs the test suite and, if it passes, publishes a
+multi-arch (`amd64` + `arm64`) image to the GitHub Container Registry:
+
+```
+ghcr.io/w0rkingchr1s/mirrorwatch:latest
+```
+
+Tags: `latest` tracks `main`; `vX.Y.Z` / `X.Y` are cut from git tags; a
+`sha-<short>` tag pins any exact build.
+
+```bash
+docker pull ghcr.io/w0rkingchr1s/mirrorwatch:latest
+```
+
+### Portainer
+
+`deploy/s-lx04-mirrorwatch.yml` is a ready-to-paste stack. It pulls the
+pre-built image (no build context needed in the web editor), stores state in a
+named volume, and reads its config from a bind mount.
+
+1. Put your config on the host at
+   `/opt/stacks/s-lx04-mirrorwatch/config/config.json` (start from an
+   `examples/` file).
+2. In Portainer, add the stack, then set the stack env vars `TELEGRAM_TOKEN`
+   and `TELEGRAM_CHAT_ID`.
+3. Deploy and watch the logs for `baseline established`.
+
+Because mirrorwatch only makes outbound requests, the stack maps no ports and
+needs no macvlan address.
+
+### Auto-updates with Watchtower
+
+The container carries the `com.centurylinklabs.watchtower.enable=true` label,
+so a Watchtower instance rolls out each new `:latest` automatically. When CI
+publishes a fresh image after a merge, the running container is replaced on the
+next Watchtower cycle — the state volume is preserved, so nothing is re-notified.
 
 ---
 
