@@ -11,9 +11,17 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - MIRRORWATCH_INTERVAL=21600
       # Fixed times instead of an interval — uncomment both and MIRRORWATCH_INTERVAL
-      # is ignored. Without a timezone the container's local time (UTC) is used.
-      # - MIRRORWATCH_CHECK_TIMES=06:00,18:00
+      # is ignored. MIRRORWATCH_TIMEZONE is the zone the times are read in.
+      # - MIRRORWATCH_CHECK_TIMES=08:00,12:00,17:00
       # - MIRRORWATCH_TIMEZONE=Europe/Berlin
+      # The container's own clock, which is what the log timestamps use. Keep it
+      # the same as MIRRORWATCH_TIMEZONE, or "next check at 17:00" is read against
+      # a UTC timestamp and looks two hours off.
+      - TZ=Europe/Berlin
+      # The healthcheck fails once the last run is older than this. It has to
+      # exceed the longest gap between two runs: the interval above, or with
+      # check times the overnight gap (17:00 -> 08:00 is 54000s).
+      - MIRRORWATCH_HEALTH_MAX_AGE=60000
       - MIRRORWATCH_LOG_LEVEL=INFO
     volumes:
       - ./config:/config:ro
