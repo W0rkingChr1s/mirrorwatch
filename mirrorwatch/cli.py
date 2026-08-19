@@ -12,6 +12,8 @@ import time
 from . import __version__
 from .config import ConfigError, load, validate
 from .core import Runner
+from .schedule import (format_times, next_run, parse_times,
+                       resolve_timezone, seconds_until)
 from .sources import build_source, dedupe
 from .util import LOG, setup_logging
 
@@ -47,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("run", parents=[common],
-                   help="run forever on the configured interval")
+                   help="run forever on the configured schedule: check_times "
+                        "if set, otherwise interval_seconds")
 
     once = sub.add_parser("once", parents=[common],
                           help="run a single pass and exit")
@@ -115,6 +118,16 @@ def cmd_status(config: dict, as_json: bool, max_age: int | None = None) -> int:
     print(f"state file : {path}")
     print(f"last run   : {last_run or 'never'}")
 
+    times = parse_times(config.get("check_times"))
+    if times:
+        tz = resolve_timezone(config.get("timezone"))
+        upcoming = next_run(times, tz)
+        zone = config.get("timezone") or "local time"
+        print(f"schedule   : {format_times(times)} ({zone})")
+        print(f"next run   : {upcoming:%Y-%m-%d %H:%M}")
+    else:
+        print(f"schedule   : every {config['interval_seconds']}s")
+
     stale = False
     if max_age is not None:
         if not last_run:
@@ -166,21 +179,51 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     interval = int(config["interval_seconds"])
-    LOG.info("mirrorwatch %s starting, interval %ss", __version__, interval)
+    times = parse_times(config.get("check_times"))
+    tz = resolve_timezone(config.get("timezone"))
+
+    # Unset means "whatever suits the mode": an interval starts counting from
+    # now, while fixed times are a promise about the clock, not about restarts.
+    run_now = config.get("run_on_start")
+    if run_now is None:
+        run_now = not times
+
+    if times:
+        LOG.info("mirrorwatch %s starting, checks at %s (%s)", __version__,
+                 format_times(times), config.get("timezone") or "local time")
+    else:
+        LOG.info("mirrorwatch %s starting, interval %ss", __version__, interval)
 
     while not _stop:
-        try:
-            Runner(config).run_once()
-        except Exception as exc:                            # noqa: BLE001
-            LOG.exception("run failed: %s", exc)
-        if _stop:
-            break
-        slept = 0
-        while slept < interval and not _stop:
-            time.sleep(min(5, interval - slept))
-            slept += 5
+        if run_now:
+            try:
+                Runner(config).run_once()
+            except Exception as exc:                        # noqa: BLE001
+                LOG.exception("run failed: %s", exc)
+            if _stop:
+                break
+        run_now = True
+        _wait(times, tz, interval)
     LOG.info("stopped")
     return 0
+
+
+def _wait(times, tz, interval: int) -> None:
+    """Sleep until the next run is due, waking often enough to notice signals."""
+    if times:
+        target = next_run(times, tz)
+        LOG.info("next check at %s", f"{target:%Y-%m-%d %H:%M}")
+        # Recomputed every tick, so a clock or DST change is picked up.
+        while not _stop:
+            remaining = seconds_until(target, tz)
+            if remaining <= 0:
+                return
+            time.sleep(min(5.0, remaining))
+        return
+    slept = 0
+    while slept < interval and not _stop:
+        time.sleep(min(5, interval - slept))
+        slept += 5
 
 
 if __name__ == "__main__":
