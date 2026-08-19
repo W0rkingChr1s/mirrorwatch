@@ -271,7 +271,10 @@ The same thing through the environment, which is what the container stacks use:
 ```
 MIRRORWATCH_CHECK_TIMES=06:00,18:00
 MIRRORWATCH_TIMEZONE=Europe/Berlin
+TZ=Europe/Berlin
 ```
+
+`TZ` is worth setting alongside: it is the container's own clock, which is what the log timestamps use. Without it a line like `11:37 … next check at 17:00` compares a UTC timestamp against a Berlin time and looks two hours off.
 
 `mirrorwatch status` prints the schedule and the next due run, and the log says `next check at …` after every pass.
 
