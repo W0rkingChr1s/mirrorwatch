@@ -10,6 +10,10 @@ services:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - MIRRORWATCH_INTERVAL=21600
+      # Fixed times instead of an interval — uncomment both and MIRRORWATCH_INTERVAL
+      # is ignored. Without a timezone the container's local time (UTC) is used.
+      # - MIRRORWATCH_CHECK_TIMES=06:00,18:00
+      # - MIRRORWATCH_TIMEZONE=Europe/Berlin
       - MIRRORWATCH_LOG_LEVEL=INFO
     volumes:
       - ./config:/config:ro

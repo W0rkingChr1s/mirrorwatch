@@ -5,6 +5,10 @@ LABEL org.opencontainers.image.title="mirrorwatch" \
       org.opencontainers.image.source="https://github.com/W0rkingChr1s/mirrorwatch" \
       org.opencontainers.image.licenses="MIT"
 
+# tzdata is the one system package needed: without it a `timezone` such as
+# Europe/Berlin cannot be resolved and check_times would run in UTC.
+RUN apk add --no-cache tzdata
+
 RUN adduser -D -u 10001 mirrorwatch
 
 WORKDIR /app

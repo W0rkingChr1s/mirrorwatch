@@ -10,11 +10,14 @@ import socketserver
 import tempfile
 import threading
 import unittest
+from datetime import date, datetime
 from email.utils import formatdate
 
 from mirrorwatch.config import ConfigError, load
 from mirrorwatch.detect import KIND_DIR, KIND_FILE, KIND_MISSING, classify, validate_rules
 from mirrorwatch.fetch import HttpClient, Response
+from mirrorwatch.schedule import (ScheduleError, format_times, next_run,
+                                  parse_times, resolve_timezone, seconds_until)
 from mirrorwatch.sources import IndexSource, ProbeSource, dedupe
 from mirrorwatch.util import resolve_secret, safe_relpath
 
@@ -310,6 +313,65 @@ class TestFullRun(unittest.TestCase):
         self.assertGreaterEqual(summary["errors"], 1)
 
 
+
+class TestSchedule(unittest.TestCase):
+    def test_parses_list_and_comma_string(self):
+        self.assertEqual(parse_times(["18:30", "06:00"]), [(6, 0), (18, 30)])
+        self.assertEqual(parse_times("06:00, 18:30"), [(6, 0), (18, 30)])
+        self.assertEqual(parse_times("07:00,07:00"), [(7, 0)])
+        self.assertEqual(parse_times([]), [])
+        self.assertEqual(parse_times(None), [])
+
+    def test_rejects_nonsense_times(self):
+        for bad in ["6", "06:60", "24:00", "noon", ["06.00"], 600]:
+            with self.assertRaises(ScheduleError):
+                parse_times(bad)
+
+    def test_formats_times(self):
+        self.assertEqual(format_times([(6, 0), (18, 30)]), "06:00, 18:30")
+
+    def test_next_run_picks_the_next_slot_today(self):
+        times = parse_times(["06:00", "18:00"])
+        target = next_run(times, None, datetime(2026, 8, 19, 7, 0))
+        self.assertEqual(target, datetime(2026, 8, 19, 18, 0))
+
+    def test_next_run_rolls_over_to_tomorrow(self):
+        times = parse_times(["06:00", "18:00"])
+        target = next_run(times, None, datetime(2026, 8, 19, 19, 0))
+        self.assertEqual(target, datetime(2026, 8, 20, 6, 0))
+
+    def test_next_run_is_strictly_after_now(self):
+        # Exactly on the slot means the run just happened; take the next one.
+        times = parse_times(["06:00", "18:00"])
+        target = next_run(times, None, datetime(2026, 8, 19, 6, 0))
+        self.assertEqual(target, datetime(2026, 8, 19, 18, 0))
+
+    def test_next_run_without_times_is_none(self):
+        self.assertIsNone(next_run([], None, datetime(2026, 8, 19, 6, 0)))
+
+    def test_seconds_until(self):
+        now = datetime(2026, 8, 19, 17, 0)
+        target = next_run(parse_times(["18:00"]), None, now)
+        self.assertEqual(seconds_until(target, None, now), 3600.0)
+        self.assertEqual(seconds_until(now, None, target), 0.0)
+
+    def test_timezone_survives_the_dst_switch(self):
+        zone = resolve_timezone("Europe/Berlin")
+        # 2026-10-25 is the European autumn switch: the day is 25 hours long,
+        # but 06:00 stays 06:00 and the wait grows accordingly.
+        now = datetime(2026, 10, 24, 7, 0, tzinfo=zone)
+        target = next_run(parse_times(["06:00"]), zone, now)
+        self.assertEqual((target.hour, target.minute), (6, 0))
+        self.assertEqual(target.date(), date(2026, 10, 25))
+        self.assertEqual(seconds_until(target, zone, now), 24 * 3600.0)
+
+    def test_unknown_timezone_is_reported(self):
+        self.assertIsNone(resolve_timezone(None))
+        with self.assertRaises(ScheduleError) as ctx:
+            resolve_timezone("Mars/Olympus_Mons")
+        self.assertIn("Mars/Olympus_Mons", str(ctx.exception))
+
+
 class TestConfigValidation(unittest.TestCase):
     def _write(self, payload) -> str:
         handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
@@ -372,6 +434,59 @@ class TestConfigValidation(unittest.TestCase):
             self.assertEqual(load(path)["interval_seconds"], 555)
         finally:
             del os.environ["MIRRORWATCH_INTERVAL"]
+            os.unlink(path)
+
+
+    def test_check_times_are_normalised(self):
+        path = self._write({"sources": [{"name": "s", "type": "urls",
+                                         "urls": ["http://x/y"]}],
+                            "check_times": ["18:30", "6:00"],
+                            "timezone": "Europe/Berlin"})
+        try:
+            self.assertEqual(load(path)["check_times"], ["06:00", "18:30"])
+        finally:
+            os.unlink(path)
+
+    def test_rejects_bad_check_times_and_timezone(self):
+        path = self._write({"sources": [{"name": "s", "type": "urls",
+                                         "urls": ["http://x/y"]}],
+                            "check_times": ["25:00"],
+                            "timezone": "Nowhere/Land"})
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load(path)
+            self.assertIn("25:00", str(ctx.exception))
+            self.assertIn("Nowhere/Land", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_schedule_env_overrides(self):
+        path = self._write({"sources": [{"name": "s", "type": "urls",
+                                         "urls": ["http://x/y"]}]})
+        os.environ["MIRRORWATCH_CHECK_TIMES"] = "07:15,19:45"
+        os.environ["MIRRORWATCH_TIMEZONE"] = "Europe/Berlin"
+        os.environ["MIRRORWATCH_RUN_ON_START"] = "true"
+        try:
+            config = load(path)
+            self.assertEqual(config["check_times"], ["07:15", "19:45"])
+            self.assertEqual(config["timezone"], "Europe/Berlin")
+            self.assertIs(config["run_on_start"], True)
+        finally:
+            for name in ("MIRRORWATCH_CHECK_TIMES", "MIRRORWATCH_TIMEZONE",
+                         "MIRRORWATCH_RUN_ON_START"):
+                del os.environ[name]
+            os.unlink(path)
+
+    def test_rejects_bad_run_on_start_env(self):
+        path = self._write({"sources": [{"name": "s", "type": "urls",
+                                         "urls": ["http://x/y"]}]})
+        os.environ["MIRRORWATCH_RUN_ON_START"] = "perhaps"
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load(path)
+            self.assertIn("MIRRORWATCH_RUN_ON_START", str(ctx.exception))
+        finally:
+            del os.environ["MIRRORWATCH_RUN_ON_START"]
             os.unlink(path)
 
 

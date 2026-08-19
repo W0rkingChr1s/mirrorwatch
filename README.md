@@ -248,10 +248,41 @@ A first run would otherwise announce everything it finds. `bootstrap_notify` con
 
 ---
 
+## When the check runs
+
+Out of the box `mirrorwatch run` works on an interval: check, wait `interval_seconds`, check again. The first check happens right away, so the clock times drift with every restart.
+
+For checks at fixed times of day, set `check_times` instead. It replaces `interval_seconds` entirely.
+
+```json
+{
+  "check_times": ["06:00", "12:00", "18:00"],
+  "timezone": "Europe/Berlin"
+}
+```
+
+- Times are 24-hour `HH:MM`, in any order — they get sorted, and duplicates dropped.
+- `timezone` is an IANA name. Leave it out and the machine's local time is used, which inside a container means UTC. In Docker the image ships tzdata, so any zone resolves.
+- Daylight saving is handled by the zone: `06:00` stays `06:00` across the switch.
+- On startup mirrorwatch waits for the next slot rather than checking immediately, so restarts and image updates do not trigger extra runs. Set `run_on_start` to `true` if you would rather have one check at boot as well, or to `false` in interval mode to wait out the first interval.
+
+The same thing through the environment, which is what the container stacks use:
+
+```
+MIRRORWATCH_CHECK_TIMES=06:00,18:00
+MIRRORWATCH_TIMEZONE=Europe/Berlin
+```
+
+`mirrorwatch status` prints the schedule and the next due run, and the log says `next check at …` after every pass.
+
+One thing to adjust with sparse schedules: the container healthcheck fails when the last run is older than `MIRRORWATCH_HEALTH_MAX_AGE` (default 45000s, half a day). Checking once a day means raising it above the longest gap between two check times, e.g. `MIRRORWATCH_HEALTH_MAX_AGE=100000`.
+
+---
+
 ## Commands
 
 ```
-mirrorwatch run                 # loop forever on interval_seconds
+mirrorwatch run                 # loop forever on check_times, or interval_seconds
 mirrorwatch once [--dry-run]    # single pass; dry-run writes nothing anywhere
 mirrorwatch check               # validate config, exit non-zero on problems
 mirrorwatch targets             # resolve and print every target, without requests to files
@@ -266,7 +297,10 @@ mirrorwatch status [--json] [--max-age SECONDS]
 
 | Key | Default | Meaning |
 |---|---|---|
-| `interval_seconds` | `21600` | Time between runs in `run` mode |
+| `interval_seconds` | `21600` | Time between runs in `run` mode; ignored when `check_times` is set |
+| `check_times` | `[]` | Fixed times of day for `run` mode, e.g. `["06:00", "18:00"]` |
+| `timezone` | `null` | IANA zone the check times are read in; `null` is the machine's local time |
+| `run_on_start` | `null` | Check once at startup? `null` means yes on an interval, no with check times |
 | `request_delay_ms` | `250` | Pause between requests; be kind to other people's servers |
 | `timeout` | `60` | Per-request timeout in seconds |
 | `retries` | `2` | Retries on network errors, with linear backoff |
@@ -279,7 +313,7 @@ mirrorwatch status [--json] [--max-age SECONDS]
 | `mirror.keep_versions` | `true` | Off means overwrite in place |
 | `bootstrap_notify` | `summary` | `summary`, `full`, or `none` |
 
-These environment variables override the file, which is what you want in a container: `MIRRORWATCH_CONFIG`, `MIRRORWATCH_STATE_FILE`, `MIRRORWATCH_MIRROR_DIR`, `MIRRORWATCH_ARCHIVE_DIR`, `MIRRORWATCH_INTERVAL`, `MIRRORWATCH_USER_AGENT`, `MIRRORWATCH_REQUEST_DELAY_MS`, `MIRRORWATCH_BOOTSTRAP_NOTIFY`, `MIRRORWATCH_LOG_LEVEL`.
+These environment variables override the file, which is what you want in a container: `MIRRORWATCH_CONFIG`, `MIRRORWATCH_STATE_FILE`, `MIRRORWATCH_MIRROR_DIR`, `MIRRORWATCH_ARCHIVE_DIR`, `MIRRORWATCH_INTERVAL`, `MIRRORWATCH_CHECK_TIMES`, `MIRRORWATCH_TIMEZONE`, `MIRRORWATCH_RUN_ON_START`, `MIRRORWATCH_USER_AGENT`, `MIRRORWATCH_REQUEST_DELAY_MS`, `MIRRORWATCH_BOOTSTRAP_NOTIFY`, `MIRRORWATCH_LOG_LEVEL`.
 
 `MIRRORWATCH_CONFIG_JSON` goes one step further: set it to the whole config as JSON and mirrorwatch skips the file entirely. This is what makes a one-paste container stack possible — see [Deployment](#portainer--paste-only-stack).
 

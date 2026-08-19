@@ -11,6 +11,7 @@ import os
 
 from .detect import validate_rules
 from .notify import BACKENDS
+from .schedule import ScheduleError, parse_times, resolve_timezone
 from .sources import SOURCE_TYPES
 
 DEFAULTS = {
@@ -20,6 +21,14 @@ DEFAULTS = {
     "request_delay_ms": 250,
     "max_download_mb": 200,
     "interval_seconds": 21600,
+    # Wall-clock times of day ("06:00", "18:00") for `run` mode. When set,
+    # they replace interval_seconds. Empty means interval mode.
+    "check_times": [],
+    # IANA zone the check times are read in; null means local time.
+    "timezone": None,
+    # Run once immediately on start? null picks the sensible default per
+    # mode: yes on an interval, no when check times are configured.
+    "run_on_start": None,
     "bootstrap_notify": "summary",
     "state_file": "./data/state.json",
     "mirror": {
@@ -35,6 +44,16 @@ DEFAULTS = {
 
 class ConfigError(Exception):
     pass
+
+
+def boolean(raw: str) -> bool:
+    """Parse the usual truthy/falsy spellings an env var arrives in."""
+    lowered = str(raw).strip().lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(raw)
 
 
 def _load_raw(path: str) -> dict:
@@ -87,6 +106,9 @@ def _apply_env_overrides(config: dict) -> dict:
         "MIRRORWATCH_MIRROR_DIR": ("mirror.dir", str),
         "MIRRORWATCH_ARCHIVE_DIR": ("mirror.archive_dir", str),
         "MIRRORWATCH_INTERVAL": ("interval_seconds", int),
+        "MIRRORWATCH_CHECK_TIMES": ("check_times", str),
+        "MIRRORWATCH_TIMEZONE": ("timezone", str),
+        "MIRRORWATCH_RUN_ON_START": ("run_on_start", boolean),
         "MIRRORWATCH_USER_AGENT": ("user_agent", str),
         "MIRRORWATCH_REQUEST_DELAY_MS": ("request_delay_ms", int),
         "MIRRORWATCH_BOOTSTRAP_NOTIFY": ("bootstrap_notify", str),
@@ -112,6 +134,25 @@ def validate(config: dict) -> list[str]:
 
     if config.get("bootstrap_notify") not in ("summary", "full", "none"):
         problems.append("bootstrap_notify must be one of: summary, full, none")
+
+    times: list[tuple[int, int]] = []
+    try:
+        times = parse_times(config.get("check_times"))
+    except ScheduleError as exc:
+        problems.append(str(exc))
+    try:
+        resolve_timezone(config.get("timezone"))
+    except ScheduleError as exc:
+        problems.append(str(exc))
+    if config.get("run_on_start") not in (None, True, False):
+        problems.append("run_on_start must be true, false, or null (automatic)")
+    if not times:
+        try:
+            if int(config.get("interval_seconds")) < 1:
+                problems.append("interval_seconds must be at least 1, or set "
+                                "check_times instead")
+        except (TypeError, ValueError):
+            problems.append("interval_seconds must be a whole number of seconds")
 
     for name, spec in (config.get("notifiers") or {}).items():
         if not isinstance(spec, dict):
@@ -178,4 +219,7 @@ def load(path: str) -> dict:
     if problems:
         raise ConfigError("invalid configuration:\n  - "
                           + "\n  - ".join(problems))
+    # Keep the parsed form canonical: a list of "HH:MM", however it arrived.
+    config["check_times"] = [f"{hour:02d}:{minute:02d}"
+                             for hour, minute in parse_times(config["check_times"])]
     return config
