@@ -495,6 +495,89 @@ class TestDirProbeRun(unittest.TestCase):
         self.assertGreater(dir_events[0].probed, 0)
         self.assertEqual(dir_events[0].found, 0)
 
+    def test_an_unfinished_sweep_resumes_where_it_stopped(self):
+        """A budget that ran out must not strand the rest of the list.
+
+        Without a memo of what was already asked about, every run would spend
+        its whole budget re-probing the same opening names and the tail would
+        never be reached at all.
+        """
+        with open(self.config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        config["sources"][0]["dir_probe"].update(
+            {"max_probes": 2, "learn": False, "derive": False,
+             "names": ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]})
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+
+        self._dir("/flyer", 1_700_000_000)
+        route("/flyer/d.pdf", b"last on the list",
+              last_modified=formatdate(1_700_000_000, usegmt=True))
+
+        # Run one gets through a.pdf and b.pdf and runs out.
+        self.assertEqual(self._run()["probed"], 2)
+        mirrored = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "mirror")):
+            mirrored += files
+        self.assertNotIn("d.pdf", mirrored)
+
+        # Run two starts at c.pdf, so the file at the end of the list is found.
+        self.assertEqual(self._run()["probed"], 2)
+        mirrored = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "mirror")):
+            mirrored += files
+        self.assertIn("d.pdf", mirrored)
+
+    def test_a_change_makes_every_name_worth_asking_about_again(self):
+        """The memo is a resume marker, not a permanent blacklist."""
+        with open(self.config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        config["sources"][0]["dir_probe"].update(
+            {"max_probes": 50, "learn": False, "derive": False,
+             "names": ["late.pdf"]})
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+
+        self._dir("/flyer", 1_700_000_000)
+        self._run()                        # late.pdf is asked about and absent
+
+        # It shows up later, and the directory's timestamp moves with it.
+        self._dir("/flyer", 1_800_000_000)
+        route("/flyer/late.pdf", b"here now",
+              last_modified=formatdate(1_800_000_000, usegmt=True))
+
+        self._run()
+        mirrored = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "mirror")):
+            mirrored += files
+        self.assertIn("late.pdf", mirrored)
+
+    def test_a_finished_sweep_is_not_repeated(self):
+        self._dir("/flyer", 1_700_000_000)
+        self._run()                       # budget is 400 here: the sweep finishes
+        self.assertEqual(self._run()["probed"], 0)
+
+    def test_probing_descends_into_directories_it_discovers(self):
+        """Recursion is what makes a whole subtree reachable without a listing."""
+        with open(self.config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        config["sources"][0]["dir_probe"].update(
+            {"depth": 3, "names": ["sub", "deep.pdf"],
+             "learn": False, "derive": False})
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+
+        self._dir("/flyer", 1_700_000_000)
+        self._dir("/flyer/sub", 1_700_000_000)
+        route("/flyer/sub/deep.pdf", b"two levels down",
+              last_modified=formatdate(1_700_000_000, usegmt=True))
+
+        self._run()
+        mirrored = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "mirror")):
+            mirrored += files
+        self.assertIn("deep.pdf", mirrored)
+
     def test_probing_stays_off_unless_configured(self):
         with open(self.config_path, encoding="utf-8") as handle:
             config = json.load(handle)
