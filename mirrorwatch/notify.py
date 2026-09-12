@@ -326,6 +326,31 @@ class TelegramNotifier(Notifier):
                         f"upload limit; the mirror has it.</i>")
             self._message(caption + note)
 
+    @staticmethod
+    def _probe_note(event: Event) -> str:
+        """What the name probing inside this directory turned up.
+
+        Saying "unknown" and stopping there is a dead end for the reader. Say
+        how hard mirrorwatch looked instead, so "nothing found" reads as a
+        result rather than a shrug — and so it is obvious when the fix is to
+        add the name to ``dir_probe.names``.
+        """
+        if event.probed is None:
+            return ("<i>ℹ️ Kein Listing verfügbar – welche Datei "
+                    "sich geändert hat, ist unbekannt.</i>")
+        if event.found == 1:
+            return (f"<i>🔍 {event.probed} Namen geprüft · "
+                    f"1 neuer Eintrag gefunden – siehe unten.</i>")
+        if event.found:
+            return (f"<i>🔍 {event.probed} Namen geprüft · "
+                    f"{event.found} neue Einträge gefunden – "
+                    f"siehe unten.</i>")
+        return (f"<i>🔍 {event.probed} Namen geprüft, kein Treffer. "
+                f"Der Server bietet kein Listing – der geänderte "
+                f"Eintrag heißt anders als alles, was mirrorwatch kennt. "
+                f"Bekannter Name? Ab damit in "
+                f"<code>dir_probe.names</code>.</i>")
+
     def _send_dir_event(self, event: Event) -> None:
         new = event.type == NEW
         heading = ("\U0001f4c1 <b>Neues Verzeichnis</b>" if new
@@ -338,12 +363,11 @@ class TelegramNotifier(Notifier):
         source = f"\U0001f4c2 {html_escape(event.source)}"
         parts.append(f"\U0001f5d3 {when}  ·  {source}" if when else source)
 
-        if not new:
-            if event.previous_modified:
-                parts.append("<i>zuvor: "
-                             f"{de_datetime(event.previous_modified, with_time=True)}</i>")
-            parts.append("<i>ℹ️ Kein Listing verfügbar – welche Datei "
-                         "sich geändert hat, ist unbekannt.</i>")
+        if not new and event.previous_modified:
+            parts.append("<i>zuvor: "
+                         f"{de_datetime(event.previous_modified, with_time=True)}</i>")
+        if not new or event.probed is not None:
+            parts.append(self._probe_note(event))
         self._message("\n".join(parts))
 
     def send_summary(self, text: str, context: dict) -> None:

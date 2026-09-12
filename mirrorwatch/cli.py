@@ -93,7 +93,10 @@ def cmd_targets(config: dict) -> int:
         source = build_source(spec)
         targets = dedupe(source.targets(client))
         total += len(targets)
-        print(f"\n{source.name} ({source.type}) -> {len(targets)} target(s)")
+        plan = source.dir_probe
+        armed = (f", probing up to {plan.max_probes} name(s) per run "
+                 f"on {plan.on}" if plan.enabled else "")
+        print(f"\n{source.name} ({source.type}) -> {len(targets)} target(s){armed}")
         for target in targets:
             marker = "d" if target.hint == "dir" else "-"
             print(f"  [{marker}] {target.url}")
