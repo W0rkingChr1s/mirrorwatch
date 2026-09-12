@@ -122,6 +122,8 @@ For every target, mirrorwatch sends a `HEAD` request and classifies the answer a
 
 Directories are compared by `Last-Modified` alone, because there is nothing to hash. On a normal POSIX filesystem that timestamp moves whenever a file inside is added, replaced, or removed — which is often the only way to learn that *something* appeared on a server with no listing.
 
+Knowing that *something* changed and not *what* is a dead end, though — so when a directory moves, `dir_probe` asks the server for candidate names inside it. See [Finding files in a directory that has no listing](#finding-files-in-a-directory-that-has-no-listing).
+
 ---
 
 ## Sources
@@ -171,6 +173,49 @@ Probing is guessing. Use it only when there is genuinely no index page.
 ```
 
 Set `"download": false` on any source to track changes from headers alone, without fetching the body. Useful for multi-gigabyte files.
+
+---
+
+## Finding files in a directory that has no listing
+
+Some servers answer a directory request with a `Last-Modified` header and an empty body. That tells you something inside changed. It does not tell you what, and there is no index page to go and read.
+
+The only lever left is that the server will confirm or deny any path you name. `dir_probe` uses it: when a directory changes, mirrorwatch tries candidate names inside it, and anything that answers becomes a normal target — downloaded, mirrored, and sent to you with the file attached.
+
+```json
+{
+  "name": "some-hub",
+  "type": "probe",
+  "base_url": "https://example.net/files.php?file=",
+  "dirs": ["docs/de/flyer"],
+  "dir_probe": {
+    "on": "change",
+    "depth": 2,
+    "max_probes": 200,
+    "names": ["preisliste.pdf"],
+    "templates": [
+      { "template": "spring{yyyy}.pdf", "years": { "from": 2026, "to": 2028 } }
+    ]
+  }
+}
+```
+
+`"dir_probe": true` accepts the defaults. Leaving it out keeps probing off, because it costs requests and that is not a decision to make on someone's behalf.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `on` | `change` | `change` probes only when the directory's timestamp moved; `always` probes every run; `never` is off |
+| `depth` | `1` | Levels to descend. `1` looks inside the changed directory; `2` also looks inside a subdirectory it just found |
+| `max_probes` | `150` | Request budget **per source, per run** — shared by every directory, not multiplied by them |
+| `names` | `[]` | Exact file names to try. If you know the house style, this is the highest-value entry |
+| `templates` | `[]` | Same `{yyyy}` / `{yy}` / `{mm}` / `{v}` expansion as `probes`, relative to the directory |
+| `learn` | `true` | Reuse every name this source has already seen, plus those names with the year shifted |
+| `derive` | `true` | Build names from the directory's own name — `yellow-weeks/` → `yellowweeks2026.pdf` |
+| `year_window` | `1` | How many years either side of today to try when shifting a year |
+
+Candidates are tried in that order of confidence: what you configured, then a name grounded in something already seen, then a name derived from the folder. The budget cuts the tail, so the ordering matters more than the length of the list.
+
+**Guessing is still guessing.** A file whose name follows no pattern and that nothing has ever seen will not be found, and the notification says so — how many names were tried, and that the changed entry is called something else — rather than reporting a shrug. When that happens, the fix is to put the real name into `names`.
 
 ---
 
@@ -329,7 +374,7 @@ mirrorwatch makes requests to servers you do not own.
 - Keep `request_delay_ms` sane. The default is deliberately unhurried.
 - Poll hourly at most unless you know the publisher is fine with more.
 - Put real contact details in `user_agent` so an administrator can reach you instead of blocking you.
-- Check the site's terms and `robots.txt`. Probe sources in particular walk a line between "checking a URL" and "enumerating someone's filesystem" — use them only where no index exists, and keep the candidate list small.
+- Check the site's terms and `robots.txt`. Probe sources and `dir_probe` in particular walk a line between "checking a URL" and "enumerating someone's filesystem" — use them only where no index exists, keep the candidate list small, and keep `max_probes` at a figure you would be comfortable explaining to the server's administrator. `on: "change"` is the default for exactly this reason: it spends requests only when the server has already said something moved.
 - Mirrored files stay under their original copyright. A local mirror is not a licence to redistribute.
 
 ---

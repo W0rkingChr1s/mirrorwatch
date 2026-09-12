@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from dataclasses import dataclass, field
 
 from .detect import KIND_DIR, KIND_ERROR, KIND_FILE, KIND_MISSING, classify
+from .discover import Budget, candidates, leaf
 from .events import CHANGED, GONE, NEW, Event
 from .fetch import HttpClient
 from .mirror import Mirror
@@ -14,6 +16,10 @@ from .notify import build_notifiers
 from .sources import Target, build_source, dedupe
 from .state import State
 from .util import LOG, http_date_to_iso, human_size, now_iso
+
+# A generated candidate list is only ever walked until the budget runs out, so
+# this cap exists purely to stop a large state file producing a huge one.
+MAX_CANDIDATES = 5000
 
 
 def _fingerprint(response) -> dict:
@@ -33,6 +39,42 @@ def _filename_from(response, rel_path: str) -> str:
         if candidate:
             return candidate
     return os.path.basename(rel_path) or "download.bin"
+
+
+def vocabulary(entries: dict) -> tuple[list[str], list[str]]:
+    """Every name this source has seen, and the file extensions among them.
+
+    File names come before directory names: when probing inside a directory,
+    a file is the thing worth finding, so it should be guessed first.
+    """
+    files: list[str] = []
+    dirs: list[str] = []
+    extensions: list[str] = []
+    for key, record in entries.items():
+        if record.get("kind") == KIND_MISSING:
+            continue
+        name = record.get("filename") or leaf(record.get("rel_path") or key)
+        if not name:
+            continue
+        if record.get("kind") == KIND_DIR:
+            dirs.append(name)
+            continue
+        files.append(name)
+        stem, dot, extension = name.rpartition(".")
+        if stem and dot and 1 <= len(extension) <= 5:
+            extensions.append(f".{extension.lower()}")
+    return (list(dict.fromkeys(files + dirs)),
+            list(dict.fromkeys(extensions)))
+
+
+@dataclass
+class _Scan:
+    """State shared by every check within one source's pass over its targets."""
+
+    budget: Budget
+    planned: set = field(default_factory=set)
+    probed: int = 0
+    errors: int = 0
 
 
 class Runner:
@@ -65,6 +107,7 @@ class Runner:
 
         events: list[Event] = []
         checked = 0
+        probed = 0
         errors = 0
 
         for spec in self.config["sources"]:
@@ -78,30 +121,45 @@ class Runner:
                 continue
 
             entries = self.state.entries(source.name)
-            # Keep watching directories discovered in earlier runs.
-            known_dirs = {key for key, rec in entries.items()
-                          if rec.get("kind") == KIND_DIR}
-            seen_keys = {t.key for t in targets}
-            for key in sorted(known_dirs - seen_keys):
+            # Keep watching what earlier runs established: directories the
+            # config named, and whatever probing discovered inside them.
+            # Without this a discovered file would be checked once, on the run
+            # that found it, and then never again.
+            carried = {key for key, record in entries.items()
+                       if record.get("kind") != KIND_MISSING
+                       and (record.get("kind") == KIND_DIR
+                            or record.get("discovered"))}
+            seen_keys = {target.key for target in targets}
+            for key in sorted(carried - seen_keys):
                 record = entries[key]
                 targets.append(Target(key=key,
                                       url=record.get("url", key),
                                       rel_path=record.get("rel_path", key),
-                                      hint=KIND_DIR))
+                                      hint=record.get("kind")))
 
-            for target in dedupe(targets):
+            targets = dedupe(targets)
+            scan = _Scan(budget=Budget(source.dir_probe.max_probes
+                                       if source.dir_probe.enabled else 0),
+                         planned={target.key for target in targets})
+
+            for target in targets:
                 checked += 1
-                event, failed = self._check(source, target, entries)
+                found, failed = self._check(source, target, entries, scan)
                 if failed:
                     errors += 1
-                if event:
-                    events.append(event)
+                events.extend(found)
                 time.sleep(self.delay)
 
-        summary = {"checked": checked, "events": len(events), "errors": errors,
-                   "bootstrap": bootstrap}
-        LOG.info("checked %s target(s), %s change(s), %s error(s)",
-                 checked, len(events), errors)
+            if scan.probed:
+                LOG.info("[%s] probed %s name(s) inside changed directories",
+                         source.name, scan.probed)
+            probed += scan.probed
+            errors += scan.errors
+
+        summary = {"checked": checked, "probed": probed, "events": len(events),
+                   "errors": errors, "bootstrap": bootstrap}
+        LOG.info("checked %s target(s), probed %s name(s), %s change(s), "
+                 "%s error(s)", checked, probed, len(events), errors)
 
         self._notify(events, summary, bootstrap)
 
@@ -114,7 +172,8 @@ class Runner:
         return summary
 
     # ------------------------------------------------------------------
-    def _check(self, source, target, entries: dict):
+    def _check(self, source, target, entries: dict, scan: _Scan,
+               depth: int = 0) -> tuple[list[Event], bool]:
         response = self.client.head(target.url, source.headers)
         kind = classify(response, source.detect_rules)
         previous = entries.get(target.key)
@@ -123,28 +182,30 @@ class Runner:
         if kind == KIND_ERROR:
             LOG.error("[%s] network error on %s: %s",
                       source.name, target.key, response.error)
-            return None, True                # never report "gone" on a network fault
+            return [], True                  # never report "gone" on a network fault
 
         if kind == KIND_MISSING:
             if was_known:
                 LOG.info("[%s] GONE %s", source.name, target.key)
                 entries[target.key] = {**previous, "kind": KIND_MISSING,
                                        "last_change": now_iso()}
-                return Event(GONE, previous.get("kind", KIND_FILE), source.name,
-                             target.key, target.url), False
-            return None, False
+                return [Event(GONE, previous.get("kind", KIND_FILE), source.name,
+                              target.key, target.url)], False
+            return [], False
 
         fingerprint = _fingerprint(response)
 
         if kind == KIND_DIR:
             return self._check_dir(source, target, entries, previous,
-                                   was_known, fingerprint), False
+                                   was_known, fingerprint, scan, depth), False
 
-        return self._check_file(source, target, entries, previous,
-                                was_known, fingerprint)
+        event, failed = self._check_file(source, target, entries, previous,
+                                         was_known, fingerprint)
+        return ([event] if event else []), failed
 
     # ------------------------------------------------------------------
-    def _check_dir(self, source, target, entries, previous, was_known, fingerprint):
+    def _check_dir(self, source, target, entries, previous, was_known,
+                   fingerprint, scan, depth) -> list[Event]:
         record = {"kind": KIND_DIR, "url": target.url, "rel_path": target.rel_path,
                   **fingerprint}
         if not was_known:
@@ -152,22 +213,82 @@ class Runner:
                                    "last_change": now_iso()}
             LOG.info("[%s] NEW dir %s (%s)", source.name, target.key,
                      fingerprint["lm"])
-            return Event(NEW, KIND_DIR, source.name, target.key, target.url,
-                         last_modified=fingerprint["lm"])
+            event = Event(NEW, KIND_DIR, source.name, target.key, target.url,
+                          last_modified=fingerprint["lm"])
+        else:
+            changed = (previous.get("lm") != fingerprint["lm"]
+                       or previous.get("etag") != fingerprint["etag"])
+            entries[target.key] = {**record,
+                                   "first_seen": previous.get("first_seen"),
+                                   "last_change": now_iso() if changed
+                                   else previous.get("last_change")}
+            if changed:
+                LOG.info("[%s] CHANGED dir %s (%s -> %s)", source.name,
+                         target.key, previous.get("lm"), fingerprint["lm"])
+                event = Event(CHANGED, KIND_DIR, source.name, target.key,
+                              target.url, last_modified=fingerprint["lm"],
+                              previous_modified=previous.get("lm"))
+            else:
+                event = None
 
-        changed = (previous.get("lm") != fingerprint["lm"]
-                   or previous.get("etag") != fingerprint["etag"])
-        entries[target.key] = {**record,
-                               "first_seen": previous.get("first_seen"),
-                               "last_change": now_iso() if changed
-                               else previous.get("last_change")}
-        if not changed:
-            return None
-        LOG.info("[%s] CHANGED dir %s (%s -> %s)", source.name, target.key,
-                 previous.get("lm"), fingerprint["lm"])
-        return Event(CHANGED, KIND_DIR, source.name, target.key, target.url,
-                     last_modified=fingerprint["lm"],
-                     previous_modified=previous.get("lm"))
+        # A directory whose mtime moved is the server admitting that something
+        # inside it appeared, vanished or was renamed — and then refusing to
+        # say what. Probing is the only way to turn that into a filename.
+        plan = source.dir_probe
+        if plan.probes_at(depth) and (plan.on == "always" or event is not None):
+            children, probed = self._probe_children(source, target, entries,
+                                                    scan, depth)
+            if event is not None:
+                event.probed = probed
+                event.found = sum(1 for child in children
+                                  if child.type in (NEW, CHANGED))
+            return ([event] if event else []) + children
+
+        return [event] if event else []
+
+    # ------------------------------------------------------------------
+    def _probe_children(self, source, target, entries: dict, scan: _Scan,
+                        depth: int) -> tuple[list[Event], int]:
+        """Ask the server, name by name, what lives inside ``target``."""
+        if scan.budget.left <= 0:
+            return [], 0
+
+        learned, extensions = vocabulary(entries)
+        names = candidates(source.dir_probe, leaf(target.key), learned,
+                           extensions, limit=MAX_CANDIDATES)
+
+        events: list[Event] = []
+        probed = 0
+        for name in names:
+            child = source.child(target, name)
+            if child.key in scan.planned:
+                continue          # already checked, or queued, by this same run
+            known = entries.get(child.key)
+            if known and known.get("kind") != KIND_MISSING:
+                continue
+            if not scan.budget.take():
+                LOG.info("[%s] probe budget of %s spent, stopping inside %s",
+                         source.name, scan.budget.limit, target.key)
+                break
+
+            scan.planned.add(child.key)
+            probed += 1
+            scan.probed += 1
+            found, failed = self._check(source, child, entries, scan, depth + 1)
+            if failed:
+                scan.errors += 1
+            for event in found:
+                record = entries.get(event.path)
+                if record is not None:
+                    # Remembered so later runs keep checking it; the config
+                    # never named it, so nothing else would bring it back.
+                    record["discovered"] = True
+                LOG.info("[%s] probe found %s %s", source.name,
+                         event.kind, event.path)
+            events.extend(found)
+            time.sleep(self.delay)
+
+        return events, probed
 
     # ------------------------------------------------------------------
     def _check_file(self, source, target, entries, previous, was_known, fingerprint):

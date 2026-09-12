@@ -28,6 +28,10 @@ class Event:
     sha256: str | None = None
     filename: str | None = None
     local_path: str | None = None
+    # Directory events only: how many names were tried inside, and how many
+    # of them turned out to exist. None means no probing ran.
+    probed: int | None = None
+    found: int | None = None
     payload: bytes | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict:
@@ -44,4 +48,6 @@ class Event:
             "sha256": self.sha256,
             "filename": self.filename,
             "local_path": self.local_path,
+            "probed": self.probed,
+            "found": self.found,
         }

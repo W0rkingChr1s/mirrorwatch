@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
+from .discover import DirProbe
 from .util import LOG
 
 
@@ -63,9 +64,21 @@ class BaseSource:
         self.mirror = spec.get("mirror", True)
         self.notify_to = spec.get("notify")        # None = all notifiers
         self.always_download = spec.get("always_download", False)
+        self.dir_probe = DirProbe(spec.get("dir_probe"))
 
     def targets(self, client) -> list[Target]:
         raise NotImplementedError
+
+    def child(self, parent: Target, name: str) -> Target:
+        """A target for ``name`` inside the directory ``parent``.
+
+        The default appends to the parent URL, which is right for anything
+        addressed by a real path. Sources that build URLs some other way
+        override it.
+        """
+        return Target(key=f"{parent.key.rstrip('/')}/{name}",
+                      url=f"{parent.url.rstrip('/')}/{name}",
+                      rel_path=f"{parent.rel_path.rstrip('/')}/{name}")
 
 
 class UrlsSource(BaseSource):
@@ -122,6 +135,10 @@ class ProbeSource(BaseSource):
                               for c in candidates for v in values]
             out.extend(candidates)
         return out
+
+    def child(self, parent: Target, name: str) -> Target:
+        path = f"{parent.key.rstrip('/')}/{name}"
+        return Target(key=path, url=self._url(path), rel_path=path)
 
     def targets(self, client) -> list[Target]:
         out: list[Target] = []

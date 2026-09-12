@@ -10,6 +10,7 @@ import json
 import os
 
 from .detect import validate_rules
+from .discover import validate_dir_probe
 from .notify import BACKENDS
 from .schedule import ScheduleError, parse_times, resolve_timezone
 from .sources import SOURCE_TYPES
@@ -204,6 +205,12 @@ def validate(config: dict) -> list[str]:
 
         if spec.get("detect"):
             problems.extend(validate_rules(spec["detect"], where))
+
+        if "dir_probe" in spec:
+            problems.extend(validate_dir_probe(spec["dir_probe"], where))
+            if spec["dir_probe"] and source_type == "urls":
+                problems.append(f"{where}: dir_probe needs a source that can "
+                                f"have directories; a urls source has none")
 
         for target in spec.get("notify") or []:
             if target not in (config.get("notifiers") or {}):

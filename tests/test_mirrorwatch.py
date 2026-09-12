@@ -15,6 +15,8 @@ from email.utils import formatdate
 
 from mirrorwatch.config import ConfigError, load
 from mirrorwatch.detect import KIND_DIR, KIND_FILE, KIND_MISSING, classify, validate_rules
+from mirrorwatch.discover import (DirProbe, candidates, derived_names,
+                                  validate_dir_probe, year_variants)
 from mirrorwatch.fetch import HttpClient, Response
 from mirrorwatch.schedule import (ScheduleError, format_times, next_run,
                                   parse_times, resolve_timezone, seconds_until)
@@ -312,6 +314,198 @@ class TestFullRun(unittest.TestCase):
         self.assertEqual(summary["events"], 0)
         self.assertGreaterEqual(summary["errors"], 1)
 
+
+
+class TestDirProbePlan(unittest.TestCase):
+    def test_absent_means_off(self):
+        """Probing costs requests, so it is never switched on by itself."""
+        self.assertFalse(DirProbe(None).enabled)
+        self.assertTrue(DirProbe({}).enabled)      # an empty object still opts in
+        self.assertTrue(DirProbe(True).enabled)
+
+    def test_never_overrides_enabled(self):
+        self.assertFalse(DirProbe({"on": "never"}).enabled)
+        self.assertFalse(DirProbe({"enabled": False}).enabled)
+
+    def test_depth_gates_recursion(self):
+        plan = DirProbe({"depth": 2})
+        self.assertTrue(plan.probes_at(0))
+        self.assertTrue(plan.probes_at(1))
+        self.assertFalse(plan.probes_at(2))
+
+    def test_year_variants_shift_the_year(self):
+        this_year = date.today().year
+        variants = year_variants(f"yellowweeks{this_year}.pdf", 1)
+        self.assertIn(f"yellowweeks{this_year + 1}.pdf", variants)
+        self.assertIn(f"yellowweeks{this_year - 1}.pdf", variants)
+        # The name we already hold is not worth a request.
+        self.assertNotIn(f"yellowweeks{this_year}.pdf", variants)
+        self.assertEqual(year_variants("katalog.pdf", 2), [])
+
+    def test_derived_names_follow_the_folder(self):
+        """yellow-weeks/yellowweeks2026.pdf is a house style, not an accident."""
+        names = derived_names("yellow-weeks", [".pdf"], 1)
+        this_year = date.today().year
+        self.assertIn(f"yellowweeks{this_year}.pdf", names)
+        self.assertIn(f"yellow-weeks{this_year}.pdf", names)
+        self.assertIn("yellowweeks.pdf", names)
+
+    def test_configured_names_are_tried_first(self):
+        plan = DirProbe({"names": ["preisliste.pdf"], "derive": True})
+        order = candidates(plan, "flyer", ["alt.pdf"], [".pdf"])
+        self.assertEqual(order[0], "preisliste.pdf")
+
+    def test_candidates_are_unique_and_capped(self):
+        plan = DirProbe({"names": ["a.pdf", "a.pdf", "b.pdf"]})
+        self.assertEqual(candidates(plan, "d", [], [], limit=2), ["a.pdf", "b.pdf"])
+
+    def test_nested_names_are_refused(self):
+        plan = DirProbe({"names": ["a.pdf"]})
+        self.assertNotIn("x/y.pdf", candidates(plan, "d", ["x/y.pdf"], []))
+
+    def test_validation_catches_typos(self):
+        self.assertEqual(validate_dir_probe({"on": "change"}, "s"), [])
+        self.assertEqual(validate_dir_probe(True, "s"), [])
+        for bad in ({"on": "sometimes"}, {"depth": -1}, {"learn": "yes"},
+                    {"nmaes": []}, {"names": ["a/b.pdf"]}, {"names": "a.pdf"}):
+            self.assertTrue(validate_dir_probe(bad, "s"),
+                            f"{bad} should have been rejected")
+
+
+class TestDirProbeRun(unittest.TestCase):
+    """The proWIN case end to end: a directory that will not say what is in it."""
+
+    def setUp(self):
+        ROUTES.clear()
+        self.server = ServerFixture()
+        self.tmp = tempfile.mkdtemp()
+        self.config_path = os.path.join(self.tmp, "config.json")
+        config = {
+            "request_delay_ms": 0,
+            "bootstrap_notify": "none",
+            "state_file": os.path.join(self.tmp, "state.json"),
+            "mirror": {"enabled": True,
+                       "dir": os.path.join(self.tmp, "mirror"),
+                       "archive_dir": os.path.join(self.tmp, "archive"),
+                       "keep_versions": True},
+            "notifiers": {"log": {"type": "stdout"}},
+            "sources": [{
+                "name": "blind",
+                "type": "probe",
+                "base_url": f"{self.server.base}/",
+                "detect": {"missing": [{"content_type": "text/plain"}],
+                           "directory": [{"content_type": "directory"}],
+                           "default": "file"},
+                "dirs": ["flyer"],
+                "files": ["flyer/yellowweeks2026.pdf"],
+                "dir_probe": {"max_probes": 400, "depth": 2},
+            }],
+        }
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+
+    def tearDown(self):
+        self.server.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        ROUTES.clear()
+
+    def _dir(self, path: str, stamp: int):
+        ROUTES[path] = {"body": b"", "content_type": "directory", "status": 200,
+                        "last_modified": formatdate(stamp, usegmt=True)}
+
+    def _run(self):
+        from mirrorwatch.core import Runner
+        return Runner(load(self.config_path)).run_once()
+
+    def test_probing_finds_the_file_the_listing_will_not_name(self):
+        year = date.today().year
+        self._dir("/flyer", 1_700_000_000)
+        route("/flyer/yellowweeks2026.pdf", b"the 2026 flyer",
+              last_modified=formatdate(1_700_000_000, usegmt=True))
+
+        # 1. baseline: the directory and the one configured file
+        self._run()
+
+        # 2. a new flyer appears under a name nobody configured, and the
+        #    directory's mtime moves because of it
+        self._dir("/flyer", 1_800_000_000)
+        route(f"/flyer/yellowweeks{year + 1}.pdf", b"next year already",
+              last_modified=formatdate(1_800_000_000, usegmt=True))
+
+        summary = self._run()
+        self.assertGreater(summary["probed"], 0)
+
+        mirrored = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "mirror")):
+            mirrored += files
+        self.assertIn(f"yellowweeks{year + 1}.pdf", mirrored)
+
+    def test_a_discovered_file_keeps_being_watched(self):
+        year = date.today().year
+        found = f"/flyer/yellowweeks{year}.pdf"
+        self._dir("/flyer", 1_700_000_000)
+        route("/flyer/yellowweeks2026.pdf", b"seed",
+              last_modified=formatdate(1_700_000_000, usegmt=True))
+        self._run()
+
+        self._dir("/flyer", 1_800_000_000)
+        route(found, b"version one", last_modified=formatdate(1_800_000_000, usegmt=True))
+        self._run()
+
+        # The config never named it, so only the "discovered" flag can bring it
+        # back — and it must, otherwise a found file is checked once and forgotten.
+        route(found, b"version two", last_modified=formatdate(1_900_000_000, usegmt=True))
+        summary = self._run()
+        self.assertEqual(summary["events"], 1)
+
+    def test_an_unchanged_directory_is_not_probed(self):
+        self._dir("/flyer", 1_700_000_000)
+        route("/flyer/yellowweeks2026.pdf", b"seed",
+              last_modified=formatdate(1_700_000_000, usegmt=True))
+        self._run()
+        self.assertEqual(self._run()["probed"], 0)
+
+    def test_the_budget_is_respected(self):
+        self._dir("/flyer", 1_700_000_000)
+        self._run()
+        self._dir("/flyer", 1_800_000_000)
+
+        with open(self.config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        config["sources"][0]["dir_probe"]["max_probes"] = 3
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+
+        self.assertEqual(self._run()["probed"], 3)
+
+    def test_probing_reports_what_it_tried(self):
+        """A dir event carries the probe counts, so the message can be honest."""
+        from mirrorwatch.core import Runner
+        self._dir("/flyer", 1_700_000_000)
+        self._run()
+        self._dir("/flyer", 1_800_000_000)
+
+        captured = []
+        runner = Runner(load(self.config_path))
+        runner.notifiers["log"].send = lambda events, ctx: captured.extend(events)
+        runner.run_once()
+
+        dir_events = [e for e in captured if e.kind == KIND_DIR]
+        self.assertEqual(len(dir_events), 1)
+        self.assertGreater(dir_events[0].probed, 0)
+        self.assertEqual(dir_events[0].found, 0)
+
+    def test_probing_stays_off_unless_configured(self):
+        with open(self.config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        del config["sources"][0]["dir_probe"]
+        with open(self.config_path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+
+        self._dir("/flyer", 1_700_000_000)
+        self._run()
+        self._dir("/flyer", 1_800_000_000)
+        self.assertEqual(self._run()["probed"], 0)
 
 
 class TestSchedule(unittest.TestCase):
