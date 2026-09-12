@@ -1,5 +1,5 @@
 {
-  "_comment": "Real world example of a server with no listing and a broken 404. Every missing path answers HTTP 200 with a short HTML body, so status codes are useless here and the detect rules key on Content-Type instead. Directories expose a POSIX mtime, which is what makes 'something new appeared' detectable at all — and dir_probe is what turns that bare 'something' into an actual file, by asking the server for one candidate name after another.",
+  "_comment": "Real world example of a server with no listing and a broken 404. Every missing path answers HTTP 200 with a short HTML body, so status codes are useless here and the detect rules key on Content-Type instead. Directories expose a POSIX mtime, which is what makes 'something new appeared' detectable at all — and dir_probe is what turns that bare 'something' into an actual file, by asking the server for one candidate name after another. Note the split into two sources: the probe budget is per source, so the subtree that matters gets its own allowance instead of competing with the rest.",
   "interval_seconds": 21600,
   "bootstrap_notify": "summary",
   "state_file": "/data/state.json",
@@ -20,7 +20,61 @@
   },
   "sources": [
     {
-      "name": "prowin-print",
+      "name": "prowin-printmedien",
+      "type": "probe",
+      "base_url": "https://prowin-hub.net/files/public/public.php?file=",
+      "detect": {
+        "missing": [
+          {
+            "content_type": "text/html"
+          }
+        ],
+        "directory": [
+          {
+            "content_type": "directory"
+          }
+        ],
+        "default": "file"
+      },
+      "dirs": [
+        "doc/1/de/printmedien",
+        "doc/1/de/printmedien/flyer",
+        "doc/1/de/printmedien/flyer/yellow-weeks",
+        "doc/1/de/printmedien/flyer/black-weeks",
+        "doc/1/de/printmedien/kataloge"
+      ],
+      "dir_probe": {
+        "on": "change",
+        "depth": 5,
+        "max_probes": 400,
+        "names": [
+          "green-weeks",
+          "red-weeks",
+          "blue-weeks",
+          "white-weeks",
+          "orange-weeks",
+          "pink-weeks",
+          "xmas-weeks",
+          "winter-weeks",
+          "summer-weeks",
+          "archiv",
+          "aktuell",
+          "preisliste.pdf",
+          "bestellformular.pdf"
+        ],
+        "templates": [
+          {
+            "template": "yellowweeks{yyyy}.pdf",
+            "years": {
+              "from": 2026,
+              "to": 2028
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "prowin-uebriges",
       "type": "probe",
       "base_url": "https://prowin-hub.net/files/public/public.php?file=",
       "detect": {
@@ -38,43 +92,14 @@
       },
       "dirs": [
         "doc/1/de",
-        "doc/1/de/printmedien",
-        "doc/1/de/printmedien/flyer",
-        "doc/1/de/printmedien/flyer/yellow-weeks",
-        "doc/1/de/printmedien/kataloge",
         "doc/1/de/media",
         "doc/1/de/werbemittel",
         "doc/1/de/aktionen"
       ],
-      "files": [
-        "doc/1/de/printmedien/flyer/yellow-weeks/yellowweeks2026.pdf"
-      ],
-      "probes": [
-        {
-          "template": "doc/1/de/printmedien/flyer/yellow-weeks/yellowweeks{yyyy}.pdf",
-          "years": {
-            "from": 2026,
-            "to": 2028
-          }
-        }
-      ],
       "dir_probe": {
         "on": "change",
-        "depth": 2,
-        "max_probes": 200,
-        "names": [
-          "preisliste.pdf",
-          "bestellformular.pdf"
-        ],
-        "templates": [
-          {
-            "template": "yellowweeks{yyyy}.pdf",
-            "years": {
-              "from": 2026,
-              "to": 2028
-            }
-          }
-        ]
+        "depth": 1,
+        "max_probes": 80
       }
     }
   ]

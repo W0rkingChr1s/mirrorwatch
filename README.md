@@ -205,7 +205,7 @@ The only lever left is that the server will confirm or deny any path you name. `
 | Key | Default | Meaning |
 |---|---|---|
 | `on` | `change` | `change` probes only when the directory's timestamp moved; `always` probes every run; `never` is off |
-| `depth` | `1` | Levels to descend. `1` looks inside the changed directory; `2` also looks inside a subdirectory it just found |
+| `depth` | `1` | Levels to descend within a single run. `1` looks inside the changed directory; `5` walks five levels of a subtree in one go |
 | `max_probes` | `150` | Request budget **per source, per run** — shared by every directory, not multiplied by them |
 | `names` | `[]` | Exact file names to try. If you know the house style, this is the highest-value entry |
 | `templates` | `[]` | Same `{yyyy}` / `{yy}` / `{mm}` / `{v}` expansion as `probes`, relative to the directory |
@@ -214,6 +214,35 @@ The only lever left is that the server will confirm or deny any path you name. `
 | `year_window` | `1` | How many years either side of today to try when shifting a year |
 
 Candidates are tried in that order of confidence: what you configured, then a name grounded in something already seen, then a name derived from the folder. The budget cuts the tail, so the ordering matters more than the length of the list.
+
+### Covering a whole subtree
+
+Recursion does not have to fit in one run. A directory probing discovers becomes a target of its own from the next run onward, and mirrorwatch records which directories it has finished looking inside. One it has *not* finished — discovered late, or cut off when the budget ran out — is swept again on the next run even though its timestamp never moved. So a subtree is mapped over successive runs instead of stalling wherever the first run happened to stop, and once it is fully mapped the probing goes quiet until something actually changes.
+
+`depth` is therefore about how much ground one run covers, not about how deep mirrorwatch can ever reach.
+
+The budget is **per source**, which is the lever for focus. A subtree that matters gets its own source and its own allowance instead of competing with everything else:
+
+```json
+"sources": [
+  {
+    "name": "print",
+    "type": "probe",
+    "base_url": "https://example.net/files.php?file=",
+    "dirs": ["docs/de/print", "docs/de/print/flyer"],
+    "dir_probe": { "depth": 5, "max_probes": 400 }
+  },
+  {
+    "name": "the-rest",
+    "type": "probe",
+    "base_url": "https://example.net/files.php?file=",
+    "dirs": ["docs/de/media", "docs/de/promo"],
+    "dir_probe": { "depth": 1, "max_probes": 80 }
+  }
+]
+```
+
+Directory names are found the same way file names are, and the learned pool does most of that work: once `flyer` and `kataloge` are known anywhere in a source, they are tried inside every directory it sweeps. A wordlist in `names` helps where a naming scheme is predictable — but expect it to miss, which is the whole reason the notification reports what it tried.
 
 **Guessing is still guessing.** A file whose name follows no pattern and that nothing has ever seen will not be found, and the notification says so — how many names were tried, and that the changed entry is called something else — rather than reporting a shrug. When that happens, the fix is to put the real name into `names`.
 

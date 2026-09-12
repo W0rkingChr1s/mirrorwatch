@@ -151,7 +151,7 @@ class Runner:
                 time.sleep(self.delay)
 
             if scan.probed:
-                LOG.info("[%s] probed %s name(s) inside changed directories",
+                LOG.info("[%s] probed %s name(s) inside its directories",
                          source.name, scan.probed)
             probed += scan.probed
             errors += scan.errors
@@ -220,6 +220,7 @@ class Runner:
                        or previous.get("etag") != fingerprint["etag"])
             entries[target.key] = {**record,
                                    "first_seen": previous.get("first_seen"),
+                                   "explored": previous.get("explored"),
                                    "last_change": now_iso() if changed
                                    else previous.get("last_change")}
             if changed:
@@ -234,10 +235,34 @@ class Runner:
         # A directory whose mtime moved is the server admitting that something
         # inside it appeared, vanished or was renamed — and then refusing to
         # say what. Probing is the only way to turn that into a filename.
+        #
+        # A directory nobody has finished looking inside is worth a sweep too,
+        # even with its timestamp untouched: it was discovered mid-run, or the
+        # budget ran out partway through it. That is what lets a deep tree
+        # converge over successive runs instead of stalling wherever the first
+        # run happened to stop.
         plan = source.dir_probe
-        if plan.probes_at(depth) and (plan.on == "always" or event is not None):
-            children, probed = self._probe_children(source, target, entries,
-                                                    scan, depth)
+        explored = (previous or {}).get("explored")
+        if plan.probes_at(depth) and (plan.on == "always" or event is not None
+                                      or not explored):
+            # Names already tried and found absent are remembered, but only
+            # until the sweep finishes: that is what makes an interrupted one
+            # resume at the point it stopped instead of burning the next run's
+            # budget on the same opening names. A change wipes the memo — the
+            # contents moved, so every name is worth asking about again.
+            tried = set() if event is not None else set(
+                (previous or {}).get("tried") or [])
+            record = entries[target.key]
+            record.pop("explored", None)
+
+            children, probed, complete = self._probe_children(
+                source, target, entries, scan, depth, tried)
+
+            if complete:
+                record["explored"] = now_iso()
+                record.pop("tried", None)
+            else:
+                record["tried"] = sorted(tried)
             if event is not None:
                 event.probed = probed
                 event.found = sum(1 for child in children
@@ -248,10 +273,16 @@ class Runner:
 
     # ------------------------------------------------------------------
     def _probe_children(self, source, target, entries: dict, scan: _Scan,
-                        depth: int) -> tuple[list[Event], int]:
-        """Ask the server, name by name, what lives inside ``target``."""
+                        depth: int, tried: set) -> tuple[list[Event], int, bool]:
+        """Ask the server, name by name, what lives inside ``target``.
+
+        ``tried`` is the caller's memo of names already asked about and not
+        found; it is read to skip them and written as the sweep goes. The third
+        return value says whether the whole candidate list was walked, because
+        a sweep the budget cut short must not be recorded as a finished one.
+        """
         if scan.budget.left <= 0:
-            return [], 0
+            return [], 0, False
 
         learned, extensions = vocabulary(entries)
         names = candidates(source.dir_probe, leaf(target.key), learned,
@@ -259,7 +290,10 @@ class Runner:
 
         events: list[Event] = []
         probed = 0
+        complete = True
         for name in names:
+            if name in tried:
+                continue          # asked about on an earlier, unfinished sweep
             child = source.child(target, name)
             if child.key in scan.planned:
                 continue          # already checked, or queued, by this same run
@@ -267,11 +301,14 @@ class Runner:
             if known and known.get("kind") != KIND_MISSING:
                 continue
             if not scan.budget.take():
-                LOG.info("[%s] probe budget of %s spent, stopping inside %s",
+                LOG.info("[%s] probe budget of %s spent, stopping inside %s; "
+                         "the next run picks up where this one left off",
                          source.name, scan.budget.limit, target.key)
+                complete = False
                 break
 
             scan.planned.add(child.key)
+            tried.add(name)
             probed += 1
             scan.probed += 1
             found, failed = self._check(source, child, entries, scan, depth + 1)
@@ -288,7 +325,7 @@ class Runner:
             events.extend(found)
             time.sleep(self.delay)
 
-        return events, probed
+        return events, probed, complete
 
     # ------------------------------------------------------------------
     def _check_file(self, source, target, entries, previous, was_known, fingerprint):
